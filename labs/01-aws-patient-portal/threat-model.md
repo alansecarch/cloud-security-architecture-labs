@@ -1,16 +1,34 @@
-# STRIDE Threat Model – Lab 01: AWS Patient Portal
+# STRIDE Threat Model
 
-## Threat Model Table
+## Overview
+This threat model outlines 10 potential threats to the AWS Patient Portal using the STRIDE framework.
 
-| STRIDE | Threat | Likely Attack Path | Primary Mitigations (AWS) | What I'd Validate |
-|--------|--------|--------------------|--------------------------|-------------------|
-| **Spoofing** | **T1 – Staff credential theft:** Attacker logs in as a legitimate staff member using stolen username/password. | Phishing email harvests staff credentials; attacker authenticates to Cognito directly. | Cognito MFA enforcement (TOTP) for `staff` group; account lockout after 5 failed attempts; CloudTrail login event logging. | Attempt login without MFA — confirm rejection; verify CloudTrail captures failed login with source IP; test account lockout triggers after 5 failures. |
-| **Spoofing** | **T2 – JWT token forgery:** Attacker crafts or modifies a JWT to impersonate another user or claim elevated group membership. | Attacker intercepts or generates a token and alters the `sub` or `cognito:groups` claim. | API Gateway Cognito authorizer validates RS256 signature against Cognito public JWKS; Lambda re-validates `cognito:groups` claim independently. | Submit a JWT with a tampered `sub` claim — confirm 401; submit a JWT signed with a different key — confirm 401; verify Lambda rejects mismatched group claims. |
-| **Tampering** | **T3 – Patient record modification:** Attacker alters a patient record they do not own by crafting a malicious API request. | Patient sends a forged `PUT /records/{id}` request substituting another patient's record ID in the path. | Lambda resolves the target record from the authenticated user's Cognito `sub` (not from the URL path); IAM condition `dynamodb:LeadingKeys` scopes writes to the caller's partition key. | Call `PUT /records/{otherId}` as an authenticated patient — confirm 403; verify DynamoDB access is scoped by partition key matching the Cognito `sub`; confirm IAM denies cross-partition writes. |
-| **Tampering** | **T4 – Request interception and modification (MITM):** Attacker intercepts HTTPS traffic and modifies the request body in transit. | Attacker performs SSL stripping or targets a misconfigured TLS endpoint; modifies request before forwarding. | CloudFront enforces TLS 1.2+ minimum; API Gateway HTTPS-only; HSTS header (`max-age=31536000`) set on all CloudFront responses; WAF blocks plaintext HTTP. | Run TLS audit (e.g., testssl.sh) — confirm TLS 1.0/1.1 rejected; send HTTP request to CloudFront origin — confirm redirect/block; verify HSTS header present in every response. |
-| **Repudiation** | **T5 – Denial of administrative action:** Staff member performs a sensitive operation and later denies it; no audit trail exists to prove otherwise. | Staff calls `DELETE /records/{id}` or modifies a record; log is absent or incomplete. | CloudTrail records all DynamoDB API calls (user identity, timestamp, source IP, request parameters); Lambda writes structured action log (user `sub`, action, resource, outcome) to CloudWatch Logs; logs are immutable (CloudTrail integrity validation enabled). | Perform a record update as staff; verify CloudTrail event appears within 15 minutes with correct user identity; verify CloudWatch Lambda log contains action, user, timestamp; attempt to delete CloudTrail log — confirm denied by S3 bucket policy. |
-| **Information Disclosure** | **T6 – PHI leakage via application logs:** Patient health data is accidentally logged and exposed to anyone with CloudWatch read access. | Lambda logs the full request event (including body containing patient name, diagnosis, medication); developer reads CloudWatch Logs in production. | Lambda logging policy: log only action type, user `sub`, resource ID, and outcome — never log payload content; API Gateway access logs exclude request/response body; log access restricted to `security-audit` IAM role. | Send API request containing PHI; search CloudWatch Logs for patient name or record content — confirm zero matches; verify API Gateway access log format excludes body; attempt to read logs as developer role — confirm denied. |
-| **Information Disclosure** | **T7 – Unauthenticated access to patient data:** Attacker accesses patient records without a valid token by calling the API directly. | Attacker sends a request to API Gateway without an `Authorization` header or with an invalid token. | API Gateway Cognito authorizer rejects all requests without a valid, unexpired JWT; default deny on all routes unless explicitly authorized. | Call any protected endpoint with no token — confirm 401; call with an expired token — confirm 401; call with a token from a different Cognito pool — confirm 401; verify no route accepts unauthenticated requests. |
-| **Denial of Service** | **T8 – API flood / resource exhaustion:** Attacker sends a high volume of requests to exhaust Lambda concurrency or DynamoDB capacity units. | Attacker scripts thousands of concurrent requests from multiple IPs; Lambda concurrency limit hit; DynamoDB throttles. | AWS WAF rate-based rule blocks IPs exceeding 2,000 requests per 5-minute window; API Gateway throttling (burst: 10,000 req/s, sustained: 5,000 req/s); Lambda reserved concurrency cap per function; CloudWatch alarm on throttled requests. | Run load test (Apache Bench, 100,000 requests); verify WAF blocks source IP after threshold; confirm API Gateway returns 429 when burst exceeded; verify Lambda CloudWatch metric `Throttles` rises and stays bounded; confirm system recovers within 5 minutes after load stops. |
-| **Elevation of Privilege** | **T9 – Patient escalates to staff role:** Authenticated patient calls a staff-only endpoint to read or modify other patients' records. | Patient obtains a valid JWT and calls `GET /admin/all-patients` or modifies another user's record path. | Lambda checks `cognito:groups` claim and rejects requests from non-staff callers before any DynamoDB access; IAM role for patient Lambda explicitly lacks `dynamodb:Scan`; API Gateway resource policy restricts admin routes to `staff` group. | Call staff endpoint with a valid patient JWT — confirm 403; verify Lambda authorization check executes before database query (code review); attempt DynamoDB Scan as patient Lambda role — confirm IAM denies; verify Cognito group is immutable by the user themselves. |
-| **Elevation of Privilege** | **T10 – Overpermissioned Lambda role:** Attacker exploits a vulnerability in one Lambda function and uses its IAM role to access unintended AWS resources. | Remote code execution vulnerability in a Lambda function; attacker calls AWS APIs using the function's execution role. | Each Lambda function has a dedicated least-privilege IAM role scoped to minimum required DynamoDB actions on specific tables; explicit `Deny` for `dynamodb:Scan` on read-only functions; KMS key policy limits decryption to authorized Lambda roles; VPC endpoints prevent direct internet access from Lambda. | Review IAM roles for all Lambda functions — confirm each is unique and scoped; attempt `aws dynamodb scan` from a read-only Lambda role — confirm IAM denies; verify KMS key policy lists only authorized role ARNs; run IAM Access Analyzer to confirm no overly broad policies. |
+### 1. Spoofing
+**Description**: Attackers may impersonate legitimate users to gain unauthorized access.
+
+### 2. Tampering
+**Description**: An attacker might manipulate sensitive data, such as altering patient records.
+
+### 3. Repudiation
+**Description**: Users may deny actions taken within the portal if adequate logging isn't implemented.
+
+### 4. Information Disclosure
+**Description**: Sensitive patient information can be exposed due to inadequate data protection or insecure APIs.
+
+### 5. Denial of Service
+**Description**: An attacker may flood the portal with requests, leading to service downtime.
+
+### 6. Elevation of Privilege
+**Description**: A user may exploit vulnerabilities to gain higher access rights than intended.
+
+### 7. SQL Injection
+**Description**: Attackers may inject malicious SQL queries to manipulate the database.
+
+### 8. Cross-Site Scripting (XSS)
+**Description**: Malicious scripts may be injected into web pages viewed by other users, potentially stealing session tokens.
+
+### 9. Phishing
+**Description**: Attackers may trick users into providing login credentials through deceptive emails or websites.
+
+### 10. Insecure APIs
+**Description**: APIs that lack proper security measures may expose backend systems to unauthorized access.
